@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Video Patcher (MP4 Header Bypass)</title>
+    <style>
+        body {
+            font-family: Consolas, monospace;
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            width: 100%;
+            max-width: 600px;
+            background: #252526;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        h2 { color: #569cd6; margin-top: 0; }
+        p { color: #9cdcfe; font-size: 14px; }
+        input[type="file"] {
+            display: block;
+            margin: 20px 0;
+            padding: 10px;
+            background: #333;
+            border: 1px dashed #569cd6;
+            width: 100%;
+            box-sizing: border-box;
+            color: #d4d4d4;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: #0e639c;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        button:hover { background-color: #1177bb; }
+        #console-log {
+            margin-top: 20px;
+            background: #1e1e1e;
+            padding: 15px;
+            height: 150px;
+            overflow-y: auto;
+            border-radius: 4px;
+            font-size: 13px;
+            border: 1px solid #333;
+        }
+        .log-info { color: #ce9178; }
+        .log-success { color: #4af626; }
+        .log-error { color: #f44747; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h2>MP4 Header Manipulator</h2>
+        <p>Injeksi "Unknown Duration" (0xFFFFFFFF) pada atom mvhd untuk bypass kompresi server.</p>
+        
+        <input type="file" id="videoInput" accept="video/mp4">
+        <button id="patchBtn">Mulai Patch & Unduh</button>
+        
+        <div id="console-log">
+            <span class="log-info">> Menunggu file MP4...</span><br>
+        </div>
+    </div>
+
+    <script>
+        const logContainer = document.getElementById('console-log');
+        const logger = (msg, type = 'info') => {
+            const span = document.createElement('span');
+            span.className = `log-${type}`;
+            span.innerText = `> ${msg}`;
+            logContainer.appendChild(span);
+            logContainer.appendChild(document.createElement('br'));
+            logContainer.scrollTop = logContainer.scrollHeight;
+        };
+
+        document.getElementById('patchBtn').addEventListener('click', async () => {
+            const fileInput = document.getElementById('videoInput');
+            if (!fileInput.files.length) {
+                logger("Error: Harap pilih file video MP4 terlebih dahulu!", "error");
+                return;
+            }
+
+            const file = fileInput.files[0];
+            logger(`Membaca file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`, "info");
+            
+            // Baca file sebagai ArrayBuffer
+            const arrayBuffer = await file.arrayBuffer();
+            const uint8 = new Uint8Array(arrayBuffer);
+            
+            // Mencari byte signature untuk atom 'mvhd' (Movie Header)
+            // Dalam representasi heksadesimal: 6D 76 68 64
+            let mvhdOffset = -1;
+            for (let i = 0; i < uint8.length - 4; i++) {
+                if (uint8[i] === 0x6D && uint8[i+1] === 0x76 && uint8[i+2] === 0x68 && uint8[i+3] === 0x64) {
+                    mvhdOffset = i;
+                    break;
+                }
+            }
+
+            if (mvhdOffset !== -1) {
+                logger(`Atom 'mvhd' ditemukan pada offset byte: ${mvhdOffset}`, "success");
+                
+                // Menentukan posisi durasi berdasarkan versi atom mvhd (versi 0 atau 1)
+                const version = uint8[mvhdOffset + 4];
+                let durationOffset = (version === 1) ? (mvhdOffset + 4 + 12 + 8) : (mvhdOffset + 4 + 12 + 4);
+                
+                logger(`Menyuntikkan Sentinel Bytes (0xFFFFFFFF) di offset ${durationOffset}...`, "info");
+                
+                // Manipulasi: Mengubah durasi asli menjadi "Unknown Duration" (maksimal 32-bit)
+                uint8[durationOffset] = 0xFF;
+                uint8[durationOffset+1] = 0xFF;
+                uint8[durationOffset+2] = 0xFF;
+                uint8[durationOffset+3] = 0xFF;
+                
+                logger("Injeksi bypass pada header selesai.", "success");
+            } else {
+                logger("Gagal: Atom 'mvhd' tidak ditemukan. Pastikan ini adalah file MP4 standar.", "error");
+                return;
+            }
+
+            // Membangun ulang file dan memicu unduhan
+            logger("Mengekstrak file yang telah di-patch...", "info");
+            const blob = new Blob([uint8], { type: 'video/mp4' });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = file.name.replace('.mp4', '_patched.mp4');
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            
+            logger("Selesai! Video berhasil diunduh.", "success");
+        });
+    </script>
+</body>
+</html>
