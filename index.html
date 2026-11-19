@@ -165,7 +165,15 @@
       color: var(--accent);
     }
 
+    .upload-area {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
     .dropzone {
+      position: relative;
+      overflow: hidden;
       border: 2px dashed #3f3f46;
       border-radius: 14px;
       padding: 30px 16px;
@@ -183,6 +191,32 @@
     .dropzone.dragover {
       border-color: var(--accent);
       background: var(--accent-glow);
+    }
+
+    .native-file-overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      cursor: pointer;
+      z-index: 5;
+      font-size: 100px;
+    }
+
+    .alt-picker-btn {
+      position: relative;
+      overflow: hidden;
+      width: 100%;
+      padding: 11px 14px;
+      border-radius: 10px;
+      background: var(--card-2);
+      border: 1px solid var(--card-border);
+      color: #e4e4e7;
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+      cursor: pointer;
     }
 
     .drop-icon {
@@ -204,10 +238,6 @@
     .drop-hint {
       font-size: 12px;
       color: var(--muted);
-    }
-
-    input[type="file"] {
-      display: none;
     }
 
     .file-header {
@@ -427,18 +457,25 @@
         <strong>Mode No Risk (MPEG-TS):</strong> Membungkus ulang stream video &amp; audio ke paket MPEG-TS 188-byte (90 kHz PCR/PTS/DTS) ber-ekstensi <code>.mp4</code> tanpa render ulang. Aman dari drop ke 30fps.
       </div>
 
-      <label class="dropzone" id="dropzone" for="fileInput">
-        <div class="drop-icon">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-            <polyline points="17 8 12 3 7 8" />
-            <line x1="12" y1="3" x2="12" y2="15" />
-          </svg>
+      <div class="upload-area" id="uploadArea">
+        <div class="dropzone" id="dropzone">
+          <input type="file" id="fileInput" class="native-file-overlay" accept="video/*,.mp4,.mov" />
+          <div class="drop-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+          </div>
+          <div class="drop-title">Tap di sini untuk pilih video MP4</div>
+          <div class="drop-hint">Langsung diproses di HP &bull; File tidak dikirim ke server</div>
         </div>
-        <div class="drop-title">Pilih atau tarik file MP4 ke sini</div>
-        <div class="drop-hint">Langsung diproses di HP &bull; File tidak dikirim ke server</div>
-        <input type="file" id="fileInput" accept="video/mp4,.mp4,.mov" />
-      </label>
+
+        <div class="alt-picker-btn">
+          <span>Pilih lewat File Manager / ZArchiver</span>
+          <input type="file" id="fileInputAll" class="native-file-overlay" accept="*/*" />
+        </div>
+      </div>
 
       <div id="inspectorPanel" class="hidden" style="display: flex; flex-direction: column; gap: 14px;">
         <div class="file-header">
@@ -765,4 +802,942 @@
       return table;
     })();
 
-    function mpegCrc3
+    function mpegCrc32(bytes) {
+      let crc = 0xffffffff;
+      for (let i = 0; i < bytes.length; i++) {
+        crc = ((crc << 8) ^ MPEG_CRC_TABLE[((crc >>> 24) ^ bytes[i]) & 0xff]) >>> 0;
+      }
+      return crc >>> 0;
+    }
+
+    function buildPatTemplate() {
+      const pkt = new Uint8Array(188);
+      pkt.fill(0xff);
+      pkt[0] = 0x47;
+      pkt[1] = 0x40;
+      pkt[2] = 0x00;
+      pkt[3] = 0x10;
+      pkt[4] = 0x00;
+
+      const sec = pkt.subarray(5, 21);
+      sec[0] = 0x00;
+      sec[1] = 0xb0;
+      sec[2] = 0x0d;
+      sec[3] = 0x00;
+      sec[4] = 0x01;
+      sec[5] = 0xc1;
+      sec[6] = 0x00;
+      sec[7] = 0x00;
+      sec[8] = 0x00;
+      sec[9] = 0x01;
+      sec[10] = 0xf0;
+      sec[11] = 0x00;
+
+      const crc = mpegCrc32(sec.subarray(0, 12));
+      sec[12] = (crc >>> 24) & 0xff;
+      sec[13] = (crc >>> 16) & 0xff;
+      sec[14] = (crc >>> 8) & 0xff;
+      sec[15] = crc & 0xff;
+      return pkt;
+    }
+
+    function buildPmtTemplate(videoStreamType, hasAudio) {
+      const pkt = new Uint8Array(188);
+      pkt.fill(0xff);
+      pkt[0] = 0x47;
+      pkt[1] = 0x50;
+      pkt[2] = 0x00;
+      pkt[3] = 0x10;
+      pkt[4] = 0x00;
+
+      const esLen = hasAudio ? 10 : 5;
+      const sectionLen = 9 + esLen + 4;
+      const sec = pkt.subarray(5, 5 + 3 + sectionLen);
+
+      sec[0] = 0x02;
+      sec[1] = 0xb0 | ((sectionLen >> 8) & 0x0f);
+      sec[2] = sectionLen & 0xff;
+      sec[3] = 0x00;
+      sec[4] = 0x01;
+      sec[5] = 0xc1;
+      sec[6] = 0x00;
+      sec[7] = 0x00;
+      sec[8] = 0xe1;
+      sec[9] = 0x00;
+      sec[10] = 0xf0;
+      sec[11] = 0x00;
+
+      sec[12] = videoStreamType;
+      sec[13] = 0xe1;
+      sec[14] = 0x00;
+      sec[15] = 0xf0;
+      sec[16] = 0x00;
+
+      let pos = 17;
+      if (hasAudio) {
+        sec[pos++] = 0x0f;
+        sec[pos++] = 0xe1;
+        sec[pos++] = 0x01;
+        sec[pos++] = 0xf0;
+        sec[pos++] = 0x00;
+      }
+
+      const crc = mpegCrc32(sec.subarray(0, pos));
+      sec[pos++] = (crc >>> 24) & 0xff;
+      sec[pos++] = (crc >>> 16) & 0xff;
+      sec[pos++] = (crc >>> 8) & 0xff;
+      sec[pos++] = crc & 0xff;
+      return pkt;
+    }
+
+    function writePtsDtsTo(out, offset, markerBits, ts90k) {
+      const v = Math.max(0, Math.round(ts90k));
+      const hi3 = Math.floor(v / 1073741824) & 0x07;
+      const lo30 = v >>> 0;
+      out[offset] = ((markerBits & 0x0f) << 4) | (hi3 << 1) | 0x01;
+      out[offset + 1] = (lo30 >>> 22) & 0xff;
+      out[offset + 2] = (((lo30 >>> 15) & 0x7f) << 1) | 0x01;
+      out[offset + 3] = (lo30 >>> 7) & 0xff;
+      out[offset + 4] = ((lo30 & 0x7f) << 1) | 0x01;
+    }
+
+    function writePcrTo(out, offset, pcr90k) {
+      const base = Math.max(0, Math.round(pcr90k));
+      const hi1 = Math.floor(base / 4294967296) & 0x01;
+      const lo32 = base >>> 0;
+      out[offset] = ((lo32 >>> 25) & 0x7f) | (hi1 << 7);
+      out[offset + 1] = (lo32 >>> 17) & 0xff;
+      out[offset + 2] = (lo32 >>> 9) & 0xff;
+      out[offset + 3] = (lo32 >>> 1) & 0xff;
+      out[offset + 4] = ((lo32 & 0x01) << 7) | 0x7e;
+      out[offset + 5] = 0x00;
+    }
+
+    function extractVideoDecoderConfig(moovView, trak, moovLength) {
+      const stsds = findAtoms(moovView, trak.dataOffset, trak.offset + trak.size, 'stsd');
+      if (!stsds.length) throw new Error('Atom stsd video tidak ditemukan.');
+      const entryStart = stsds[0].dataOffset + 8;
+      const codec = readFourCC(moovView, entryStart + 4);
+      const entryEnd = entryStart + moovView.getUint32(entryStart, false);
+
+      const startCode = new Uint8Array([0x00, 0x00, 0x00, 0x01]);
+      const paramSets = [];
+      let nalLengthSize = 4;
+      let streamType = 0x1b;
+
+      if (codec === 'avc1' || codec === 'avc3') {
+        streamType = 0x1b;
+        const avccs = findAtoms(moovView, entryStart + 86, Math.min(entryEnd, moovLength), 'avcC');
+        if (!avccs.length) throw new Error('Konfigurasi avcC (H.264) tidak ditemukan.');
+        const off = avccs[0].dataOffset;
+        nalLengthSize = (moovView.getUint8(off + 4) & 0x03) + 1;
+
+        let cursor = off + 5;
+        const numSps = moovView.getUint8(cursor++) & 0x1f;
+        for (let i = 0; i < numSps; i++) {
+          const spsLen = moovView.getUint16(cursor, false);
+          cursor += 2;
+          paramSets.push(startCode);
+          paramSets.push(new Uint8Array(moovView.buffer, moovView.byteOffset + cursor, spsLen));
+          cursor += spsLen;
+        }
+        const numPps = moovView.getUint8(cursor++);
+        for (let i = 0; i < numPps; i++) {
+          const ppsLen = moovView.getUint16(cursor, false);
+          cursor += 2;
+          paramSets.push(startCode);
+          paramSets.push(new Uint8Array(moovView.buffer, moovView.byteOffset + cursor, ppsLen));
+          cursor += ppsLen;
+        }
+      } else if (codec === 'hvc1' || codec === 'hev1') {
+        throw new Error('Video HEVC / H.265 ditolak untuk Mode No Risk. Gunakan file berformat H.264 (avc1).');
+      } else {
+        throw new Error(`Codec video "${codec}" tidak didukung untuk remux MPEG-TS.`);
+      }
+
+      return { codec, streamType, nalLengthSize, paramSets };
+    }
+
+    function extractAudioAdtsConfig(moovView, trak, timescale, moovLength) {
+      let profile = 1;
+      let freqIdx = 3;
+      let chanCfg = 2;
+
+      const freqMap = {
+        96000: 0, 88200: 1, 64000: 2, 48000: 3, 44100: 4, 32000: 5,
+        24000: 6, 22050: 7, 16000: 8, 12000: 9, 11025: 10, 8000: 11, 7350: 12
+      };
+      if (freqMap[timescale] !== undefined) freqIdx = freqMap[timescale];
+
+      const stsds = findAtoms(moovView, trak.dataOffset, trak.offset + trak.size, 'stsd');
+      if (stsds.length) {
+        const entryStart = stsds[0].dataOffset + 8;
+        const entryEnd = Math.min(entryStart + moovView.getUint32(entryStart, false), moovLength);
+        chanCfg = moovView.getUint16(entryStart + 24, false) || 2;
+
+        for (let p = entryStart + 36; p + 8 <= entryEnd; p++) {
+          if (readFourCC(moovView, p + 4) === 'esds') {
+            const esdsData = new Uint8Array(moovView.buffer, moovView.byteOffset + p + 12, entryEnd - (p + 12));
+            for (let i = 0; i + 4 < esdsData.length; i++) {
+              if (esdsData[i] === 0x05) {
+                let idx = i + 1;
+                while (idx < esdsData.length && (esdsData[idx] & 0x80)) idx++;
+                idx++;
+                if (idx + 1 < esdsData.length) {
+                  const asc0 = esdsData[idx];
+                  const asc1 = esdsData[idx + 1];
+                  const objType = (asc0 >> 3) & 0x1f;
+                  if (objType > 0) profile = objType - 1;
+                  freqIdx = ((asc0 & 0x07) << 1) | ((asc1 >> 7) & 0x01);
+                  chanCfg = (asc1 >> 3) & 0x0f;
+                }
+                break;
+              }
+            }
+            break;
+          }
+        }
+      }
+
+      return { profile, freqIdx, chanCfg };
+    }
+
+    class TrackWindowReader {
+      constructor(file, windowSize) {
+        this.file = file;
+        this.windowSize = windowSize;
+        this.winStart = -1;
+        this.winEnd = -1;
+        this.winBytes = null;
+      }
+
+      has(offset, length) {
+        return offset >= this.winStart && offset + length <= this.winEnd;
+      }
+
+      readSync(offset, length) {
+        const rel = offset - this.winStart;
+        return this.winBytes.subarray(rel, rel + length);
+      }
+
+      async fill(offset, length) {
+        const fetchLen = Math.max(this.windowSize, length);
+        const end = Math.min(this.file.size, offset + fetchLen);
+        const buf = await this.file.slice(offset, end).arrayBuffer();
+        this.winStart = offset;
+        this.winEnd = end;
+        this.winBytes = new Uint8Array(buf);
+      }
+    }
+
+    async function runNoRiskMpegTsRemuxer(file, cachedTopBoxes, cachedMoovBuffer, onProgress) {
+      const topBoxes = cachedTopBoxes || (await scanTopBoxes(file));
+      const moovBox = topBoxes.find((b) => b.type === 'moov');
+      if (!moovBox) throw new Error('Atom moov tidak ditemukan.');
+
+      const moovBuffer = cachedMoovBuffer || (await file.slice(moovBox.offset, moovBox.offset + moovBox.size).arrayBuffer());
+      const moovView = new DataView(moovBuffer);
+
+      const traks = findAtoms(moovView, 8, moovBuffer.byteLength, 'trak');
+      let videoTrak = null;
+      let audioTrak = null;
+
+      for (const trak of traks) {
+        const hdlrs = findAtoms(moovView, trak.dataOffset, trak.offset + trak.size, 'hdlr');
+        if (!hdlrs.length) continue;
+        const type = readFourCC(moovView, hdlrs[0].dataOffset + 8);
+        if (type === 'vide' && !videoTrak) videoTrak = trak;
+        if (type === 'soun' && !audioTrak) audioTrak = trak;
+      }
+
+      if (!videoTrak) throw new Error('Track video tidak ditemukan di dalam file.');
+
+      const videoCfg = extractVideoDecoderConfig(moovView, videoTrak, moovBuffer.byteLength);
+      const videoTrack = parseTrackSamples(moovView, videoTrak);
+      if (!videoTrack || videoTrack.sampleCount === 0) {
+        throw new Error('Tabel sample video rusak atau kosong.');
+      }
+
+      let audioTrack = null;
+      let audioCfg = null;
+      if (audioTrak) {
+        audioTrack = parseTrackSamples(moovView, audioTrak);
+        if (audioTrack && audioTrack.sampleCount > 0) {
+          audioCfg = extractAudioAdtsConfig(moovView, audioTrak, audioTrack.timescale, moovBuffer.byteLength);
+        } else {
+          audioTrack = null;
+        }
+      }
+
+      const vCount = videoTrack.sampleCount;
+      const aCount = audioTrack ? audioTrack.sampleCount : 0;
+      const totalEvents = vCount + aCount;
+      const BASE_90K = 9000;
+      const vScale = 90000 / videoTrack.timescale;
+      const aScale = audioTrack ? (90000 / audioTrack.timescale) : 1;
+
+      const SLAB_PACKETS = 11160;
+      const SLAB_BYTES = SLAB_PACKETS * 188;
+      let slab = new Uint8Array(SLAB_BYTES);
+      let slabPos = 0;
+      const tsChunks = [];
+      let totalTsPackets = 0;
+
+      function pushFixedPacket(pkt188) {
+        if (slabPos + 188 > SLAB_BYTES) {
+          tsChunks.push(slab);
+          slab = new Uint8Array(SLAB_BYTES);
+          slabPos = 0;
+        }
+        slab.set(pkt188, slabPos);
+        slabPos += 188;
+        totalTsPackets++;
+      }
+
+      let ccVid = 0;
+      let ccAud = 0;
+
+      function streamPesToSlab(pid, segments, segCount, totalBytes, isVideo, pcr90k, isKeyframe) {
+        let remaining = totalBytes;
+        let partIdx = 0;
+        let partOffset = 0;
+        let first = true;
+
+        while (remaining > 0) {
+          if (slabPos + 188 > SLAB_BYTES) {
+            tsChunks.push(slab);
+            slab = new Uint8Array(SLAB_BYTES);
+            slabPos = 0;
+          }
+
+          const p = slabPos;
+          const needPcr = first && pcr90k !== null;
+          let headerLen = 4;
+          let afc = 0x10;
+
+          if (needPcr || remaining < 184) {
+            afc = 0x30;
+            let payloadToCopy = remaining;
+            if (needPcr && payloadToCopy > 176) payloadToCopy = 176;
+            const adaptFieldTotal = 184 - payloadToCopy;
+            const adaptLength = adaptFieldTotal - 1;
+
+            slab[p + 4] = adaptLength;
+            if (adaptLength > 0) {
+              slab[p + 5] = (needPcr ? 0x10 : 0x00) | (first && isKeyframe ? 0x40 : 0x00);
+              let afCursor = p + 6;
+              if (needPcr) {
+                writePcrTo(slab, afCursor, pcr90k);
+                afCursor += 6;
+              }
+              const afEnd = p + 4 + adaptFieldTotal;
+              if (afCursor < afEnd) slab.fill(0xff, afCursor, afEnd);
+            }
+            headerLen = 4 + adaptFieldTotal;
+          }
+
+          const cc = isVideo ? ccVid : ccAud;
+          slab[p] = 0x47;
+          slab[p + 1] = (first ? 0x40 : 0x00) | ((pid >> 8) & 0x1f);
+          slab[p + 2] = pid & 0xff;
+          slab[p + 3] = afc | (cc & 0x0f);
+          if (isVideo) ccVid = (ccVid + 1) & 0x0f;
+          else ccAud = (ccAud + 1) & 0x0f;
+
+          const copyLen = 188 - headerLen;
+          let dst = p + headerLen;
+          let toWrite = copyLen;
+
+          while (toWrite > 0 && partIdx < segCount) {
+            const seg = segments[partIdx];
+            const avail = seg.length - partOffset;
+            if (avail <= 0) {
+              partIdx++;
+              partOffset = 0;
+              continue;
+            }
+            const take = avail < toWrite ? avail : toWrite;
+            if (take === 1) {
+              slab[dst] = seg[partOffset];
+            } else {
+              slab.set(seg.subarray(partOffset, partOffset + take), dst);
+            }
+            dst += take;
+            partOffset += take;
+            toWrite -= take;
+            if (partOffset >= seg.length) {
+              partIdx++;
+              partOffset = 0;
+            }
+          }
+
+          remaining -= copyLen;
+          slabPos += 188;
+          first = false;
+          totalTsPackets++;
+        }
+      }
+
+      const patTemplate = buildPatTemplate();
+      const pmtTemplate = buildPmtTemplate(videoCfg.streamType, Boolean(audioTrack));
+      let ccPat = 0;
+      let ccPmt = 0;
+
+      const startCode = new Uint8Array([0x00, 0x00, 0x00, 0x01]);
+      const audNalu = new Uint8Array([0x00, 0x00, 0x00, 0x01, 0x09, 0xf0]);
+
+      const pesVidPtsOnly = new Uint8Array(14);
+      pesVidPtsOnly.set([0x00, 0x00, 0x01, 0xe0, 0x00, 0x00, 0x80, 0x80, 0x05], 0);
+
+      const pesVidPtsDts = new Uint8Array(19);
+      pesVidPtsDts.set([0x00, 0x00, 0x01, 0xe0, 0x00, 0x00, 0x80, 0xc0, 0x0a], 0);
+
+      const pesAudHdr = new Uint8Array(14);
+      pesAudHdr.set([0x00, 0x00, 0x01, 0xc0, 0x00, 0x00, 0x80, 0x80, 0x05], 0);
+
+      const adtsHdr = new Uint8Array(7);
+      if (audioCfg) {
+        adtsHdr[0] = 0xff;
+        adtsHdr[1] = 0xf1;
+        adtsHdr[2] = ((audioCfg.profile & 0x03) << 6) | ((audioCfg.freqIdx & 0x0f) << 2) | ((audioCfg.chanCfg >> 2) & 0x01);
+        adtsHdr[6] = 0xfc;
+      }
+
+      let segList = new Array(32);
+
+      const videoReader = new TrackWindowReader(file, 12 * 1024 * 1024);
+      const audioReader = new TrackWindowReader(file, 4 * 1024 * 1024);
+
+      const nLenSize = videoCfg.nalLengthSize;
+      const paramSets = videoCfg.paramSets;
+
+      let vIdx = 0;
+      let aIdx = 0;
+      let vNextDts = videoTrack.dtsArr[0] * vScale + BASE_90K;
+      let aNextDts = aCount > 0 ? (audioTrack.dtsArr[0] * aScale + BASE_90K) : Infinity;
+      let lastPatPcrDts = Math.min(vNextDts, aNextDts);
+      let lastYieldTime = performance.now();
+
+      patTemplate[3] = 0x10 | (ccPat++ & 0x0f);
+      pushFixedPacket(patTemplate);
+      pmtTemplate[3] = 0x10 | (ccPmt++ & 0x0f);
+      pushFixedPacket(pmtTemplate);
+
+      for (let step = 0; step < totalEvents; step++) {
+        const takeVideo = aIdx >= aCount || (vIdx < vCount && vNextDts <= aNextDts);
+
+        if (takeVideo) {
+          const off = videoTrack.offsets[vIdx];
+          const sz = videoTrack.sizes[vIdx];
+          if (!videoReader.has(off, sz)) {
+            await videoReader.fill(off, sz);
+          }
+          const rawSample = videoReader.readSync(off, sz);
+
+          const dts90k = vNextDts;
+          const pts90k = videoTrack.ptsArr[vIdx] * vScale + BASE_90K;
+          const isSync = videoTrack.syncFlags[vIdx] === 1;
+
+          const emitPsi = isSync || (dts90k - lastPatPcrDts >= 3600);
+          if (emitPsi) {
+            if (step > 0) {
+              patTemplate[3] = 0x10 | (ccPat++ & 0x0f);
+              pushFixedPacket(patTemplate);
+              pmtTemplate[3] = 0x10 | (ccPmt++ & 0x0f);
+              pushFixedPacket(pmtTemplate);
+            }
+            lastPatPcrDts = dts90k;
+          }
+
+          let segCount = 0;
+          let totalBytes = 0;
+
+          const hasDts = Math.abs(pts90k - dts90k) > 1;
+          if (hasDts) {
+            writePtsDtsTo(pesVidPtsDts, 9, 0x03, pts90k);
+            writePtsDtsTo(pesVidPtsDts, 14, 0x01, dts90k);
+            segList[segCount++] = pesVidPtsDts;
+            totalBytes += 19;
+          } else {
+            writePtsDtsTo(pesVidPtsOnly, 9, 0x02, pts90k);
+            segList[segCount++] = pesVidPtsOnly;
+            totalBytes += 14;
+          }
+
+          segList[segCount++] = audNalu;
+          totalBytes += audNalu.length;
+
+          if (isSync) {
+            for (let p = 0; p < paramSets.length; p++) {
+              const ps = paramSets[p];
+              segList[segCount++] = ps;
+              totalBytes += ps.length;
+            }
+          }
+
+          let pos = 0;
+          while (pos + nLenSize <= rawSample.length) {
+            let nalLen = 0;
+            for (let b = 0; b < nLenSize; b++) {
+              nalLen = (nalLen * 256) + rawSample[pos + b];
+            }
+            pos += nLenSize;
+            if (nalLen <= 0 || pos + nalLen > rawSample.length) break;
+
+            if (segCount + 2 > segList.length) {
+              segList.length = segList.length * 2;
+            }
+            segList[segCount++] = startCode;
+            segList[segCount++] = rawSample.subarray(pos, pos + nalLen);
+            totalBytes += 4 + nalLen;
+            pos += nalLen;
+          }
+
+          const pcrVal = emitPsi ? Math.max(0, dts90k - 450) : null;
+          streamPesToSlab(0x0100, segList, segCount, totalBytes, true, pcrVal, isSync);
+
+          vIdx++;
+          vNextDts = vIdx < vCount ? (videoTrack.dtsArr[vIdx] * vScale + BASE_90K) : Infinity;
+        } else {
+          const off = audioTrack.offsets[aIdx];
+          const sz = audioTrack.sizes[aIdx];
+          if (!audioReader.has(off, sz)) {
+            await audioReader.fill(off, sz);
+          }
+          const rawSample = audioReader.readSync(off, sz);
+
+          const dts90k = aNextDts;
+          const fullAdtsLen = rawSample.length + 7;
+          const pesPayloadLen = 8 + fullAdtsLen;
+
+          pesAudHdr[4] = (pesPayloadLen >> 8) & 0xff;
+          pesAudHdr[5] = pesPayloadLen & 0xff;
+          writePtsDtsTo(pesAudHdr, 9, 0x02, dts90k);
+
+          adtsHdr[3] = ((audioCfg.chanCfg & 0x03) << 6) | ((fullAdtsLen >> 11) & 0x03);
+          adtsHdr[4] = (fullAdtsLen >> 3) & 0xff;
+          adtsHdr[5] = ((fullAdtsLen & 0x07) << 5) | 0x1f;
+
+          segList[0] = pesAudHdr;
+          segList[1] = adtsHdr;
+          segList[2] = rawSample;
+          streamPesToSlab(0x0101, segList, 3, 14 + fullAdtsLen, false, null, true);
+
+          aIdx++;
+          aNextDts = aIdx < aCount ? (audioTrack.dtsArr[aIdx] * aScale + BASE_90K) : Infinity;
+        }
+
+        if ((step & 511) === 0 && onProgress) {
+          const now = performance.now();
+          if (now - lastYieldTime >= 45) {
+            onProgress(Math.round((step / totalEvents) * 100));
+            lastYieldTime = now;
+            await new Promise((r) => setTimeout(r, 0));
+          }
+        }
+      }
+
+      if (slabPos > 0) {
+        tsChunks.push(slab.subarray(0, slabPos));
+      }
+
+      if (onProgress) onProgress(100);
+
+      return {
+        blob: new Blob(tsChunks, { type: 'video/mp4' }),
+        detailText: `${totalTsPackets.toLocaleString()} paket TS (188B)`
+      };
+    }
+
+    function getLastAudioPackets(moovView, moovLength, scanCount = 12) {
+      const traks = findAtoms(moovView, 8, moovLength, 'trak');
+      for (const trak of traks) {
+        const hdlrs = findAtoms(moovView, trak.dataOffset, trak.offset + trak.size, 'hdlr');
+        if (!hdlrs.length) continue;
+        if (readFourCC(moovView, hdlrs[0].dataOffset + 8) !== 'soun') continue;
+
+        const parsed = parseTrackSamples(moovView, trak);
+        if (!parsed || parsed.sampleCount === 0) return [];
+
+        const startIdx = Math.max(0, parsed.sampleCount - scanCount);
+        const packets = [];
+        for (let i = startIdx; i < parsed.sampleCount; i++) {
+          packets.push({ offset: parsed.offsets[i], size: parsed.sizes[i] });
+        }
+        return packets;
+      }
+      return [];
+    }
+
+    function tryInjectIdDseToAacPacket(packetBuffer) {
+      const bytes = new Uint8Array(packetBuffer);
+      const len = bytes.length;
+      if (len < 6) return null;
+
+      if (bytes[len - 1] === 0x00 && bytes[len - 2] === 0x00 && bytes[len - 3] === 0x00) {
+        bytes.copyWithin(3, 0, len - 3);
+        bytes[0] = 0x80;
+        bytes[1] = 0x01;
+        bytes[2] = Math.floor(Math.random() * 256);
+        return bytes.buffer;
+      }
+      return null;
+    }
+
+    function buildSignatureFreeAtom() {
+      const sig = `NRK_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const payload = new TextEncoder().encode(sig);
+      const totalSize = 8 + payload.length;
+
+      const buf = new ArrayBuffer(totalSize);
+      new DataView(buf).setUint32(0, totalSize, false);
+      const bytes = new Uint8Array(buf);
+      bytes.set([0x66, 0x72, 0x65, 0x65], 4);
+      bytes.set(payload, 8);
+      return buf;
+    }
+
+    async function runZeroCompressHqPatcher(file, cachedTopBoxes, cachedMoovBuffer) {
+      const topBoxes = cachedTopBoxes || (await scanTopBoxes(file));
+      const moovBox = topBoxes.find((b) => b.type === 'moov');
+      if (!moovBox) throw new Error('Atom moov tidak ditemukan.');
+
+      const moovBuffer = cachedMoovBuffer || (await file.slice(moovBox.offset, moovBox.offset + moovBox.size).arrayBuffer());
+      const moovView = new DataView(moovBuffer);
+
+      const candidatePackets = getLastAudioPackets(moovView, moovBuffer.byteLength, 12);
+      const patchedAudioMap = new Map();
+
+      for (let i = candidatePackets.length - 1; i >= 0 && patchedAudioMap.size < 4; i--) {
+        const pkt = candidatePackets[i];
+        const rawPkt = await file.slice(pkt.offset, pkt.offset + pkt.size).arrayBuffer();
+        const patchedBuf = tryInjectIdDseToAacPacket(rawPkt);
+        if (patchedBuf) {
+          patchedAudioMap.set(pkt.offset, { size: pkt.size, buffer: patchedBuf });
+        }
+      }
+
+      const outputParts = [];
+      const sortedAudioOffsets = [...patchedAudioMap.keys()].sort((a, b) => a - b);
+
+      for (const box of topBoxes) {
+        if (box.type === 'moov') {
+          const dummyFreeHeader = new Uint8Array(8);
+          new DataView(dummyFreeHeader.buffer).setUint32(0, box.size, false);
+          dummyFreeHeader.set([0x66, 0x72, 0x65, 0x65], 4);
+          outputParts.push(dummyFreeHeader);
+          outputParts.push(file.slice(box.offset + 8, box.offset + box.size));
+        } else if (box.type === 'mdat' && sortedAudioOffsets.length > 0) {
+          let cursor = box.offset;
+          const boxEnd = box.offset + box.size;
+
+          for (const pktOffset of sortedAudioOffsets) {
+            if (pktOffset >= cursor && pktOffset < boxEnd) {
+              const pkt = patchedAudioMap.get(pktOffset);
+              if (pktOffset > cursor) {
+                outputParts.push(file.slice(cursor, pktOffset));
+              }
+              outputParts.push(pkt.buffer);
+              cursor = pktOffset + pkt.size;
+            }
+          }
+          if (cursor < boxEnd) {
+            outputParts.push(file.slice(cursor, boxEnd));
+          }
+        } else {
+          outputParts.push(file.slice(box.offset, box.offset + box.size));
+        }
+      }
+
+      outputParts.push(moovBuffer);
+      outputParts.push(buildSignatureFreeAtom());
+
+      return {
+        blob: new Blob(outputParts, { type: 'video/mp4' }),
+        detailText: `moov\u2192free + ID_DSE (${sortedAudioOffsets.length} AAC)`
+      };
+    }
+
+    const tabNoRisk = document.getElementById('tabNoRisk');
+    const tabHq = document.getElementById('tabHq');
+    const modeDescBox = document.getElementById('modeDescBox');
+    const uploadArea = document.getElementById('uploadArea');
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+    const fileInputAll = document.getElementById('fileInputAll');
+    const inspectorPanel = document.getElementById('inspectorPanel');
+    const fileNameDisplay = document.getElementById('fileNameDisplay');
+    const resetBtn = document.getElementById('resetBtn');
+    const metaCodec = document.getElementById('metaCodec');
+    const metaResFps = document.getElementById('metaResFps');
+    const metaSize = document.getElementById('metaSize');
+    const metaBitrate = document.getElementById('metaBitrate');
+    const hevcWarning = document.getElementById('hevcWarning');
+    const errorAlert = document.getElementById('errorAlert');
+    const progressWrap = document.getElementById('progressWrap');
+    const progressText = document.getElementById('progressText');
+    const progressPct = document.getElementById('progressPct');
+    const progressFill = document.getElementById('progressFill');
+    const patchBtn = document.getElementById('patchBtn');
+    const patchBtnLabel = document.getElementById('patchBtnLabel');
+    const resultBox = document.getElementById('resultBox');
+    const statTime = document.getElementById('statTime');
+    const statDetail = document.getElementById('statDetail');
+    const downloadLink = document.getElementById('downloadLink');
+    const downloadBtnLabel = document.getElementById('downloadBtnLabel');
+
+    let activeMode = 'norisk';
+    let currentFile = null;
+    let cachedTopBoxes = null;
+    let cachedMoovBuffer = null;
+    let currentMeta = null;
+    let currentDownloadUrl = null;
+
+    function formatBytes(bytes) {
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+    }
+
+    function clearDownloadUrl() {
+      if (currentDownloadUrl) {
+        URL.revokeObjectURL(currentDownloadUrl);
+        currentDownloadUrl = null;
+      }
+    }
+
+    function showError(msg) {
+      errorAlert.textContent = msg;
+      errorAlert.classList.add('show');
+    }
+
+    function hideError() {
+      errorAlert.textContent = '';
+      errorAlert.classList.remove('show');
+    }
+
+    function updateCodecWarning() {
+      hevcWarning.classList.remove('show');
+      if (!currentMeta) return;
+      const isHevc = currentMeta.codec === 'hvc1' || currentMeta.codec === 'hev1';
+      if (!isHevc) return;
+
+      if (activeMode === 'norisk') {
+        hevcWarning.innerHTML =
+          '<strong>HEVC / H.265 Ditolak:</strong> Mode No Risk menolak video HEVC demi menjaga kestabilan stream. Gunakan file H.264.';
+        hevcWarning.classList.add('show');
+      } else {
+        hevcWarning.innerHTML =
+          '<strong>Peringatan HEVC pada 0 Kompres:</strong> Mode 0 Kompres / HQ mewajibkan input <strong>H.264 (avc1)</strong> agar server TikTok meloloskan bitstream tanpa re-encode.';
+        hevcWarning.classList.add('show');
+      }
+    }
+
+    function setMode(mode) {
+      activeMode = mode;
+      resultBox.classList.remove('show');
+      progressWrap.classList.remove('show');
+      hideError();
+
+      if (currentMeta) {
+        const isHevc = currentMeta.codec === 'hvc1' || currentMeta.codec === 'hev1';
+        if (activeMode === 'norisk' && isHevc) {
+          showError('Video HEVC / H.265 ditolak untuk Mode No Risk. Gunakan file berformat H.264 (avc1).');
+          patchBtn.disabled = true;
+          updateCodecWarning();
+          return;
+        } else {
+          patchBtn.disabled = false;
+        }
+      }
+
+      if (mode === 'norisk') {
+        tabNoRisk.classList.add('active');
+        tabHq.classList.remove('active');
+        modeDescBox.innerHTML =
+          '<strong>Mode No Risk (MPEG-TS):</strong> Membungkus ulang stream video &amp; audio ke paket MPEG-TS 188-byte (90 kHz PCR/PTS/DTS) ber-ekstensi <code>.mp4</code> tanpa render ulang. Aman dari drop ke 30fps.';
+        patchBtnLabel.textContent = 'Jalankan No-Risk Remux';
+      } else {
+        tabHq.classList.add('active');
+        tabNoRisk.classList.remove('active');
+        modeDescBox.innerHTML =
+          '<strong>Mode 0 Kompres / HQ:</strong> Memindahkan atom <code>moov &rarr; free</code> di kontainer MP4 asli dan menyuntikkan payload <code>ID_DSE</code> pada paket audio AAC terakhir untuk mempertahankan bitrate asli.';
+        patchBtnLabel.textContent = 'Jalankan 0-Kompres Patch';
+      }
+      updateCodecWarning();
+    }
+
+    tabNoRisk.addEventListener('click', () => setMode('norisk'));
+    tabHq.addEventListener('click', () => setMode('hq'));
+
+    async function handleSelectedFile(file) {
+      if (!file) return;
+      clearDownloadUrl();
+      hideError();
+      resultBox.classList.remove('show');
+      progressWrap.classList.remove('show');
+      hevcWarning.classList.remove('show');
+
+      currentFile = file;
+      cachedTopBoxes = null;
+      cachedMoovBuffer = null;
+      currentMeta = null;
+
+      uploadArea.classList.add('hidden');
+      inspectorPanel.classList.remove('hidden');
+      fileNameDisplay.textContent = file.name || 'video.mp4';
+      metaSize.textContent = formatBytes(file.size);
+      metaCodec.textContent = 'Memindai...';
+      metaCodec.className = 'meta-value';
+      metaResFps.textContent = '...';
+      metaBitrate.textContent = '...';
+      patchBtn.disabled = true;
+
+      try {
+        cachedTopBoxes = await scanTopBoxes(file);
+        const moovBox = cachedTopBoxes.find((b) => b.type === 'moov');
+        if (!moovBox) {
+          throw new Error('Atom moov tidak ditemukan. Pastikan file yang dipilih berformat MP4.');
+        }
+
+        cachedMoovBuffer = await file
+          .slice(moovBox.offset, moovBox.offset + moovBox.size)
+          .arrayBuffer();
+        const moovView = new DataView(cachedMoovBuffer);
+        currentMeta = inspectMoovMetadata(moovView, cachedMoovBuffer.byteLength, file.size);
+
+        const isHevc = currentMeta.codec === 'hvc1' || currentMeta.codec === 'hev1';
+        const isAvc = currentMeta.codec === 'avc1' || currentMeta.codec === 'avc3';
+
+        if (isAvc) {
+          metaCodec.textContent = `H.264 (${currentMeta.codec})`;
+          metaCodec.className = 'meta-value codec-ok';
+        } else if (isHevc) {
+          metaCodec.textContent = `HEVC (${currentMeta.codec})`;
+          metaCodec.className = 'meta-value codec-warn';
+        } else {
+          metaCodec.textContent = currentMeta.codec.toUpperCase();
+        }
+
+        const resPart = currentMeta.width && currentMeta.height ? `${currentMeta.width}x${currentMeta.height}` : 'N/A';
+        const fpsPart = currentMeta.fps > 0 ? `${Math.round(currentMeta.fps * 100) / 100} fps` : '';
+        metaResFps.textContent = fpsPart ? `${resPart} @ ${fpsPart}` : resPart;
+        metaBitrate.textContent = currentMeta.bitrateMbps > 0 ? `${currentMeta.bitrateMbps.toFixed(2)} Mbps` : 'N/A';
+
+        if (activeMode === 'norisk' && isHevc) {
+          throw new Error('Video HEVC / H.265 ditolak untuk Mode No Risk. Gunakan file berformat H.264 (avc1).');
+        }
+
+        updateCodecWarning();
+        patchBtn.disabled = false;
+      } catch (err) {
+        showError(err.message || 'Gagal membaca struktur MP4.');
+      }
+    }
+
+    function bindFileInput(inputEl) {
+      ['change', 'input'].forEach((evtName) => {
+        inputEl.addEventListener(evtName, (e) => {
+          const files = e.target.files;
+          if (files && files.length > 0) {
+            handleSelectedFile(files[0]);
+          }
+        });
+      });
+    }
+
+    bindFileInput(fileInput);
+    bindFileInput(fileInputAll);
+
+    ['dragenter', 'dragover'].forEach((evt) => {
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropzone.classList.add('dragover');
+      });
+    });
+
+    ['dragleave', 'drop'].forEach((evt) => {
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropzone.classList.remove('dragover');
+      });
+    });
+
+    dropzone.addEventListener('drop', (e) => {
+      const files = e.dataTransfer?.files;
+      if (files && files.length > 0) handleSelectedFile(files[0]);
+    });
+
+    resetBtn.addEventListener('click', () => {
+      clearDownloadUrl();
+      currentFile = null;
+      cachedTopBoxes = null;
+      cachedMoovBuffer = null;
+      currentMeta = null;
+      fileInput.value = '';
+      fileInputAll.value = '';
+      resultBox.classList.remove('show');
+      progressWrap.classList.remove('show');
+      hideError();
+      inspectorPanel.classList.add('hidden');
+      uploadArea.classList.remove('hidden');
+    });
+
+    patchBtn.addEventListener('click', async () => {
+      if (!currentFile) return;
+      hideError();
+      resultBox.classList.remove('show');
+      patchBtn.disabled = true;
+
+      try {
+        const t0 = performance.now();
+        let res;
+
+        if (activeMode === 'norisk') {
+          progressWrap.classList.add('show');
+          progressFill.style.width = '0%';
+          progressPct.textContent = '0%';
+          progressText.textContent = 'Membungkus paket MPEG-TS 188B...';
+          patchBtnLabel.textContent = 'Remuxing ke MPEG-TS...';
+
+          res = await runNoRiskMpegTsRemuxer(
+            currentFile,
+            cachedTopBoxes,
+            cachedMoovBuffer,
+            (pct) => {
+              progressFill.style.width = `${pct}%`;
+              progressPct.textContent = `${pct}%`;
+            }
+          );
+        } else {
+          patchBtnLabel.textContent = 'Memproses atom MP4...';
+          res = await runZeroCompressHqPatcher(currentFile, cachedTopBoxes, cachedMoovBuffer);
+        }
+
+        const elapsed = Math.round(performance.now() - t0);
+        clearDownloadUrl();
+        currentDownloadUrl = URL.createObjectURL(res.blob);
+
+        const baseName = (currentFile.name || 'video').replace(/\.[^/.]+$/, '');
+        const prefix = activeMode === 'norisk' ? 'norisk_ts' : '0kompres_hq';
+        const outFileName = `${prefix}_${baseName}.mp4`;
+
+        downloadLink.href = currentDownloadUrl;
+        downloadLink.download = outFileName;
+        downloadBtnLabel.textContent = `Download MP4 (${formatBytes(res.blob.size)})`;
+
+        statTime.textContent = `Selesai dalam ${elapsed} ms`;
+        statDetail.textContent = res.detailText;
+        resultBox.classList.add('show');
+      } catch (err) {
+        showError(err.message || 'Terjadi kesalahan saat memproses video.');
+      } finally {
+        const isHevc = currentMeta && (currentMeta.codec === 'hvc1' || currentMeta.codec === 'hev1');
+        patchBtn.disabled = Boolean(activeMode === 'norisk' && isHevc);
+        patchBtnLabel.textContent = activeMode === 'norisk' ? 'Jalankan No-Risk Remux' : 'Jalankan 0-Kompres Patch';
+      }
+    });
+  </script>
+</body>
+</html>
